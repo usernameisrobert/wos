@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WOS v2.3 - Storage Architecture</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background: #000;
+            color: #00ff00;
+            font-family: 'Consolas', 'Courier New', monospace;
+            height: 100vh;
+            margin: 0;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Setup Screen Overlay */
+        #setupOverlay {
+            position: fixed;
+            inset: 0;
+            background: #000;
+            z-index: 9999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            color: white;
+        }
+        .setup-card {
+            background: #1e293b;
+            padding: 40px;
+            border-radius: 16px;
+            width: 450px;
+            box-shadow: 0 25px 50px -12px rgba(0,0,0,0.5);
+            border: 1px solid rgba(255,255,255,0.1);
+        }
+        .storage-option {
+            background: rgba(255,255,255,0.05);
+            padding: 20px;
+            border-radius: 12px;
+            margin-top: 15px;
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 2px solid transparent;
+        }
+        .storage-option:hover { background: rgba(255,255,255,0.1); border-color: #3b82f6; }
+
+        /* Terminal View */
+        #terminalView { flex: 1; padding: 20px; overflow-y: auto; display: none; }
+        #inputLine { display: flex; align-items: center; }
+        #termInput {
+            background: transparent; border: none; outline: none;
+            color: #00ff00; flex: 1; margin-left: 8px;
+            font-family: inherit; font-size: 16px;
+        }
+
+        /* Desktop View */
+        #desktopView {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: linear-gradient(135deg, #0f172a, #1e1b4b);
+            color: white;
+            font-family: 'Segoe UI', sans-serif;
+            z-index: 1000;
+        }
+        #iconGrid { display: grid; grid-template-columns: repeat(auto-fill, 110px); gap: 15px; padding: 30px; }
+        .wasm-icon { display: flex; flex-direction: column; align-items: center; cursor: pointer; padding: 12px; border-radius: 12px; transition: all 0.2s; }
+        .wasm-icon:hover { background: rgba(255,255,255,0.15); transform: translateY(-2px); }
+        .icon-visual { width: 54px; height: 54px; background: rgba(255,255,255,0.1); backdrop-filter: blur(5px); border: 1px solid rgba(255,255,255,0.2); border-radius: 14px; display: flex; align-items: center; justify-content: center; margin-bottom: 10px; font-size: 24px; }
+
+        /* Windowing system */
+        .window { position: absolute; background: #ffffff; border-radius: 10px; box-shadow: 0 20px 50px rgba(0,0,0,0.6); display: flex; flex-direction: column; overflow: hidden; border: 1px solid rgba(0,0,0,0.1); z-index: 1001; }
+        .window-header { height: 36px; background: #ebebeb; display: flex; align-items: center; justify-content: space-between; color: #222; cursor: default; }
+        .window-title { font-size: 13px; font-weight: 600; padding-left: 15px; }
+        .close-btn { width: 45px; height: 36px; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background 0.2s; }
+        .close-btn:hover { background: #ff3b30; color: white; }
+        .window-content { flex: 1; background: #000; position: relative; }
+        canvas { width: 100%; height: 100%; image-rendering: pixelated; }
+    </style>
+</head>
+<body>
+
+    <!-- BIOS SETUP SCREEN -->
+    <div id="setupOverlay">
+        <div class="setup-card">
+            <h1 class="text-2xl font-bold mb-2">WOS Boot Manager</h1>
+            <p class="text-slate-400 text-sm mb-6">Select primary storage architecture to initialize the kernel.</p>
+            
+            <div class="storage-option" onclick="initializeStorage('file')">
+                <div class="flex items-center gap-3">
+                    <span class="text-2xl">💾</span>
+                    <div>
+                        <div class="font-semibold text-blue-400">File-Based (Direct)</div>
+                        <div class="text-xs text-slate-300">Creates a .wos_drive file on your computer. Persistent & Fast.</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="storage-option" onclick="initializeStorage('local')">
+                <div class="flex items-center gap-3">
+                    <span class="text-2xl">☁️</span>
+                    <div>
+                        <div class="font-semibold text-amber-400">LocalData (Temporary)</div>
+                        <div class="text-xs text-slate-300">Uses browser cache. Data may be cleared by browser.</div>
+                    </div>
+                </div>
+            </div>
+            
+            <p class="mt-6 text-[10px] text-slate-500 uppercase tracking-widest text-center">WOS Kernel v2.3.0 - Ready to Boot</p>
+        </div>
+    </div>
+
+    <div id="terminalView">
+        <div id="logArea"></div>
+        <div id="inputLine">
+            <span>root@wos:~#</span>
+            <input type="text" id="termInput" autofocus autocomplete="off">
+        </div>
+    </div>
+
+    <div id="desktopView">
+        <div id="iconGrid"></div>
+    </div>
+
+    <script>
+        class WOSKernel {
+            constructor() {
+                this.memory = new WebAssembly.Memory({ initial: 256 });
+                this.memView = new DataView(this.memory.buffer);
+                this.mode = 0; 
+                this.inputState = { mx: 0, my: 0, mb: 0, lastKey: "" };
+                this.processes = [];
+                this.fileHandle = null; // Used for File-Based storage
+                
+                this.setupImports();
+                this.listenToInput();
+                this.startKernelLoop();
+            }
+
+            setupImports() {
+                this.imports = {
+                    env: {
+                        memory: this.memory,
+                        wos_get_mode: () => this.mode,
+                        wos_set_mode: (m) => {
+                            this.mode = m;
+                            document.getElementById('terminalView').style.display = m === 0 ? 'block' : 'none';
+                            document.getElementById('desktopView').style.display = m === 1 ? 'block' : 'none';
+                        },
+                        wos_create_desktop_icon: (namePtr, filePtr, emojiPtr) => {
+                            this.addIconToHardwareGrid(this.readString(namePtr), this.readString(filePtr), this.readString(emojiPtr));
+                        },
+                        wos_open_window: (titlePtr, x, y, w, h) => {
+                            return this.createWindow(this.readString(titlePtr), x, y, w, h);
+                        },
+                        wos_set_pixel: (pidPtr, x, y, r, g, b) => {
+                            this.drawToWindow(this.readString(pidPtr), x, y, `rgb(${r},${g},${b})`);
+                        },
+                        wos_move_window: (pidPtr, x, y) => {
+                            const win = document.getElementById(this.readString(pidPtr));
+                            if (win) { win.style.left = x + 'px'; win.style.top = y + 'px'; }
+                        },
+                        wos_resize_window: (pidPtr, w, h) => {
+                            const pid = this.readString(pidPtr);
+                            const win = document.getElementById(pid);
+                            if (win) {
+                                win.style.width = w + 'px'; win.style.height = h + 'px';
+                                const canvas = win.querySelector('canvas');
+                                canvas.width = w; canvas.height = h - 36;
+                            }
+                        },
+                        wos_set_title: (pidPtr, titlePtr) => {
+                            const win = document.getElementById(this.readString(pidPtr));
+                            if (win) win.querySelector('.window-title').innerText = this.readString(titlePtr);
+                        },
+                        wos_terminal_write: (strPtr) => {
+                            terminalLog(this.readString(strPtr));
+                        }
+                    }
+                };
+            }
+
+            readString(ptr) {
+                const bytes = new Uint8Array(this.memory.buffer, ptr);
+                let str = "";
+                for(let i=0; bytes[i] !== 0 && i < 512; i++) str += String.fromCharCode(bytes[i]);
+                return str;
+            }
+
+            writeString(str, ptr) {
+                const bytes = new TextEncoder().encode(str + "\0");
+                new Uint8Array(this.memory.buffer).set(bytes, ptr);
+            }
+
+            addIconToHardwareGrid(name, filename, emoji) {
+                const grid = document.getElementById('iconGrid');
+                const el = document.createElement('div');
+                el.className = 'wasm-icon';
+                el.onclick = () => this.loadAndRun(filename);
+                el.innerHTML = `<div class="icon-visual">${emoji}</div><div class="icon-text">${name}</div>`;
+                grid.appendChild(el);
+            }
+
+            createWindow(title, x, y, w, h) {
+                const pid = 'proc_' + Math.random().toString(36).substr(2, 5);
+                const win = document.createElement('div');
+                win.id = pid; win.className = 'window';
+                win.style.cssText = `left:${x}px; top:${y}px; width:${w}px; height:${h}px;`;
+                win.innerHTML = `
+                    <div class="window-header" onmousedown="handleDrag(event, '${pid}')">
+                        <span class="window-title">${title}</span>
+                        <div class="close-btn" onclick="document.getElementById('${pid}').remove()">✕</div>
+                    </div>
+                    <div class="window-content"><canvas id="canvas_${pid}"></canvas></div>
+                `;
+                document.getElementById('desktopView').appendChild(win);
+                const canvas = win.querySelector('canvas');
+                canvas.width = w; canvas.height = h - 36;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = "white"; ctx.fillRect(0, 0, w, h);
+                this.processes.push({ pid, canvas, ctx });
+                return pid;
+            }
+
+            drawToWindow(pid, x, y, color) {
+                const proc = this.processes.find(p => p.pid === pid);
+                if (!proc) return;
+                proc.ctx.fillStyle = color; proc.ctx.fillRect(x, y, 2, 2);
+            }
+
+            listenToInput() {
+                document.addEventListener('mousemove', e => { this.inputState.mx = e.clientX; this.inputState.my = e.clientY; });
+                document.addEventListener('mousedown', () => this.inputState.mb = 1);
+                document.addEventListener('mouseup', () => this.inputState.mb = 0);
+                document.addEventListener('keydown', e => {
+                    if (e.key.length === 1) this.inputState.lastKey = e.key;
+                    if (e.key === 'Backspace') this.inputState.lastKey = '\b';
+                });
+            }
+
+            startKernelLoop() {
+                const sync = () => {
+                    this.memView.setInt32(0, this.inputState.mx, true);
+                    this.memView.setInt32(4, this.inputState.my, true);
+                    this.memView.setInt32(8, this.inputState.mb, true);
+                    if (this.inputState.lastKey) {
+                        this.memView.setUint8(12, this.inputState.lastKey.charCodeAt(0));
+                        this.inputState.lastKey = "";
+                    } else { this.memView.setUint8(12, 0); }
+                    requestAnimationFrame(sync);
+                };
+                sync();
+            }
+
+            async boot(storageType) {
+                document.getElementById('setupOverlay').style.display = 'none';
+                document.getElementById('terminalView').style.display = 'block';
+                
+                terminalLog("WOS Kernel v2.3.0 Loading...");
+                if (storageType === 'file') {
+                    try {
+                        // FileSystem API to simulate a "Drive"
+                        const [handle] = await window.showOpenFilePicker({
+                            types: [{ description: 'WOS Drive', accept: { 'application/octet-stream': ['.wos_drive'] } }],
+                            excludeAcceptAllOption: false,
+                            multiple: false
+                        });
+                        this.fileHandle = handle;
+                        terminalLog("Mounted C:\\ via local file system.");
+                    } catch (e) {
+                        terminalLog("Mounting failed. Falling back to RAM-Disk.", "orange");
+                    }
+                } else {
+                    terminalLog("Initialized LocalData transient storage.");
+                }
+                
+                terminalLog("Welcome to WOS. Type 'ls' or 'run desktop.wasm'");
+            }
+
+            async loadAndRun(filename) {
+                const bytes = new Uint8Array([0x00,0x61,0x73,0x6d,0x01,0x00,0x00,0x00,0x01,0x04,0x01,0x60,0x00,0x00,0x03,0x02,0x01,0x00,0x07,0x09,0x01,0x05,0x6d,0x61,0x69,0x6e,0x5f,0x00,0x00,0x0a,0x04,0x01,0x02,0x00,0x0b]);
+                try {
+                    const { instance } = await WebAssembly.instantiate(bytes, this.imports);
+                    instance.exports.main_();
+                    
+                    if (filename === 'desktop.wasm') {
+                        this.runDesktopBinary();
+                    } else if (filename === 'hello.wasm') {
+                        const msg = 5000; this.writeString("Hello! File: " + filename, msg);
+                        this.imports.env.wos_terminal_write(msg);
+                    } else {
+                        if (this.imports.env.wos_get_mode() === 0) {
+                            const err = 6000; this.writeString("error: This program cannot be run in terminal!", err);
+                            this.imports.env.wos_terminal_write(err);
+                            return;
+                        }
+                        this.launchGraphicsApp(filename);
+                    }
+                } catch (e) { terminalLog(`Kernel Panic: ${e.message}`, 'red'); }
+            }
+
+            runDesktopBinary() {
+                this.imports.env.wos_set_mode(1);
+                const apps = [
+                    ["Drawing Pad", "draw.wasm", "🎨", 3000],
+                    ["Bouncing Box", "bounce.wasm", "⚽", 3300],
+                    ["Typewriter", "type.wasm", "⌨️", 3600]
+                ];
+                apps.forEach(([n, f, e, base]) => {
+                    this.writeString(n, base); this.writeString(f, base+100); this.writeString(e, base+200);
+                    this.imports.env.wos_create_desktop_icon(base, base+100, base+200);
+                });
+            }
+
+            launchGraphicsApp(filename) {
+                if (filename === 'draw.wasm') this.startDrawProc();
+                if (filename === 'bounce.wasm') this.startBounceProc();
+                if (filename === 'type.wasm') this.startTypeProc();
+            }
+
+            startDrawProc() {
+                const pid = this.createWindow("Drawing Pad", 100, 100, 100, 136);
+                const pidPtr = 2100; this.writeString(pid, pidPtr);
+                const loop = () => {
+                    const win = document.getElementById(pid); if (!win) return;
+                    const mx = this.memView.getInt32(0, true), my = this.memView.getInt32(4, true);
+                    const rect = win.getBoundingClientRect();
+                    const rx = mx - rect.left, ry = (my - rect.top) - 36;
+                    if (rx >= 0 && rx < 100 && ry >= 0 && ry < 100 && this.memView.getInt32(8, true)) 
+                        this.imports.env.wos_set_pixel(pidPtr, rx, ry, 0, 0, 0);
+                    requestAnimationFrame(loop);
+                };
+                loop();
+            }
+
+            startBounceProc() {
+                const pid = this.createWindow("Bouncing Box", 300, 50, 150, 150);
+                const pidPtr = 2200; this.writeString(pid, pidPtr);
+                let x = 300, y = 50, w = 150, dx = 3, dy = 3, dw = 1;
+                const loop = () => {
+                    if (!document.getElementById(pid)) return;
+                    x += dx; y += dy; w += dw;
+                    if (x < 0 || x > window.innerWidth - w) dx *= -1;
+                    if (y < 0 || y > window.innerHeight - (w + 48)) dy *= -1;
+                    if (w < 80 || w > 250) dw *= -1;
+                    this.imports.env.wos_move_window(pidPtr, x, y);
+                    this.imports.env.wos_resize_window(pidPtr, w, w);
+                    requestAnimationFrame(loop);
+                };
+                loop();
+            }
+
+            startTypeProc() {
+                let currentStr = "type here: ";
+                const pid = this.createWindow(currentStr, 400, 300, 300, 100);
+                const pidPtr = 2300, titlePtr = 2400; this.writeString(pid, pidPtr);
+                const loop = () => {
+                    if (!document.getElementById(pid)) return;
+                    const charCode = this.memView.getUint8(12);
+                    if (charCode !== 0) {
+                        const char = String.fromCharCode(charCode);
+                        if (char === '\b') { if (currentStr.length > 11) currentStr = currentStr.slice(0, -1); }
+                        else currentStr += char;
+                        this.writeString(currentStr, titlePtr);
+                        this.imports.env.wos_set_title(pidPtr, titlePtr);
+                    }
+                    requestAnimationFrame(loop);
+                };
+                loop();
+            }
+        }
+
+        const kernel = new WOSKernel();
+        
+        function initializeStorage(type) {
+            kernel.boot(type);
+        }
+
+        const termInput = document.getElementById('termInput');
+        const logArea = document.getElementById('logArea');
+        const terminalView = document.getElementById('terminalView');
+
+        function terminalLog(msg, color = 'inherit') {
+            const line = document.createElement('div');
+            line.style.color = color; line.innerHTML = msg;
+            logArea.appendChild(line);
+            terminalView.scrollTop = terminalView.scrollHeight;
+        }
+
+        termInput.addEventListener('keydown', async (e) => {
+            if (e.key === 'Enter') {
+                const val = termInput.value.trim();
+                const cmd = val.toLowerCase();
+                terminalLog(`root@wos:~# ${val}`);
+                termInput.value = '';
+                if (cmd === 'help') terminalLog("Commands: ls, run [file], clear");
+                else if (cmd === 'ls') terminalLog("<span style='color:#00ffff'>desktop.wasm</span>&nbsp;&nbsp;<span style='color:#00ffff'>hello.wasm</span>&nbsp;&nbsp;<span style='color:#94a3b8'>draw.wasm</span>&nbsp;&nbsp;<span style='color:#94a3b8'>bounce.wasm</span>&nbsp;&nbsp;<span style='color:#94a3b8'>type.wasm</span>");
+                else if (cmd.startsWith('run ')) await kernel.loadAndRun(val.split(' ')[1]);
+                else if (cmd === 'clear') logArea.innerHTML = '';
+                else if (cmd !== '') terminalLog(`error: command not found: ${cmd}`, 'red');
+            }
+        });
+
+        let dragTarget = null, dragOffset = { x: 0, y: 0 };
+        function handleDrag(e, id) {
+            if (e.target.closest('.close-btn')) return;
+            dragTarget = document.getElementById(id);
+            dragOffset.x = e.clientX - dragTarget.offsetLeft;
+            dragOffset.y = e.clientY - dragTarget.offsetTop;
+            document.querySelectorAll('.window').forEach(w => w.style.zIndex = 1001);
+            dragTarget.style.zIndex = 2000;
+        }
+        document.addEventListener('mousemove', e => {
+            if (dragTarget) {
+                dragTarget.style.left = (e.clientX - dragOffset.x) + 'px';
+                dragTarget.style.top = (e.clientY - dragOffset.y) + 'px';
+            }
+        });
+        document.addEventListener('mouseup', () => dragTarget = null);
+    </script>
+</body>
+</html>
