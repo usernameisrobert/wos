@@ -194,8 +194,7 @@
 
             async fetchProgramList() {
                 try {
-                    // Simulating the /programs call
-                    // In a real env, this is: const res = await fetch('/programs');
+                    // Simulating the /programs manifest
                     this.programs = [
                         { name: 'desktop.wasm', path: '/programs/desktop.wasm', graphics: true },
                         { name: 'clock.wasm', path: '/programs/clock.wasm', graphics: false },
@@ -209,20 +208,33 @@
 
             async mountFileSystem() {
                 try {
-                    // REAL File System Access API
+                    // Check if the API is supported
+                    if (!('showSaveFilePicker' in window)) {
+                        throw new Error("File System Access API not supported in this browser.");
+                    }
+
+                    // Request the user to create/select a file
                     const handle = await window.showSaveFilePicker({
                         suggestedName: 'drive_c.wos_drive',
-                        types: [{ description: 'WOS Virtual Disk', accept: {'application/octet-stream': ['.wos_drive']} }]
+                        types: [{
+                            description: 'WOS Virtual Disk',
+                            accept: {'application/octet-stream': ['.wos_drive']}
+                        }],
                     });
+
                     this.fileHandle = handle;
-                    
-                    // Verify permission
-                    const permission = await handle.queryPermission({mode: 'readwrite'});
-                    if (permission !== 'granted') await handle.requestPermission({mode: 'readwrite'});
-                    
+
+                    // Immediately test write access and create the file physically
+                    const writable = await handle.createWritable();
+                    const initData = new TextEncoder().encode("WOS_FS_V1");
+                    await writable.write(initData);
+                    await writable.close();
+
+                    console.log("File system mounted successfully:", handle.name);
                     return true;
                 } catch (e) {
-                    console.warn("File System Access denied or cancelled.", e);
+                    console.error("Hardware File System Error:", e);
+                    terminalLog(`FS ERROR: ${e.message}`, 'red');
                     return false;
                 }
             }
@@ -234,7 +246,7 @@
                     status.innerText = "Requesting Hardware Access...";
                     const success = await this.mountFileSystem();
                     if (!success) {
-                        status.innerText = "Access Denied. Try LocalData.";
+                        status.innerText = "Access Denied or Not Supported.";
                         return;
                     }
                 }
@@ -247,6 +259,7 @@
                 
                 terminalLog(`[[ WOS KERNEL v2.5 BOOTED ]]`);
                 terminalLog(`Storage: ${storage.toUpperCase()}`);
+                if (storage === 'file') terminalLog(`Mounted: ${this.fileHandle.name}`);
                 terminalLog(`Programs indexed: ${this.programs.map(p => p.name).join(', ')}`);
                 terminalLog("Ready. Type 'run desktop.wasm'");
             }
@@ -261,11 +274,7 @@
                 terminalLog(`Fetching ${prog.path}...`);
                 
                 try {
-                    // Here we'd actually fetch the wasm from the server
-                    // const response = await fetch(prog.path);
-                    // const bytes = await response.arrayBuffer();
-                    
-                    // Mocking a successful fetch and instantiation
+                    // Logic to fetch and instantiate would go here.
                     if (prog.graphics) this.imports.env.set_mode(1);
                     
                     if (filename === 'desktop.wasm') {
@@ -282,22 +291,18 @@
                 const render = () => {
                     if (this.mode !== 1) return;
                     
-                    // Software rendering background (handled by desktop.wasm logic)
                     this.imports.env.gpu_clear(10, 10, 20);
 
-                    // Draw Desktop Grid
                     for(let x=0; x<this.vram.width; x+=20) {
                         for(let y=0; y<this.vram.height; y+=20) {
                             this.imports.env.gpu_draw_pixel(x, y, 30, 30, 50);
                         }
                     }
 
-                    // Draw Program Icons from the /programs list
                     this.programs.forEach((p, i) => {
                         this.drawRect(20 + (i*50), 20, 30, 30, 0, 150, 255);
                     });
 
-                    // Software Cursor
                     this.drawRect(this.input.x, this.input.y, 3, 3, 0, 255, 0);
 
                     this.ctx.putImageData(this.vram, 0, 0);
@@ -325,6 +330,7 @@
 
         function terminalLog(msg, color = '#00ff00') {
             const log = document.getElementById('logArea');
+            if (!log) return;
             log.innerHTML += `<div class="log-entry" style="color: ${color}">${msg}</div>`;
             document.getElementById('terminalView').scrollTop = 9999;
         }
