@@ -14,10 +14,13 @@ def serve_home():
 def serve_programs():
     return send_from_directory(BASE_DIR, 'programs.txt')
 
-@app.route('/desktop.wasm')
-def serve_wasm():
-    # Adding mimetype for WASM is good practice for browser compatibility
-    return send_from_directory(BASE_DIR, 'desktop.wasm', mimetype='application/wasm')
+@app.route('/<filename>.wasm')
+def serve_wasm(filename):
+    # Construct the full filename with the extension
+    wasm_file = f"{filename}.wasm"
+    
+    # send_from_directory safely handles path traversal 
+    return send_from_directory(BASE_DIR, wasm_file, mimetype='application/wasm')
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True)
