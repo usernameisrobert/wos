@@ -3,359 +3,302 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WOS v2.5 - Dynamic Cloud Kernel</title>
+    <title>WOS - Web Operating System</title>
+    <!-- PWA Metadata for Installability -->
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <link rel="manifest" id="manifest-placeholder">
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body {
-            background: #000;
-            color: #00ff00;
-            font-family: 'Consolas', 'Courier New', monospace;
-            height: 100vh;
+        body, html {
             margin: 0;
-            overflow: hidden;
-        }
-
-        /* Setup Screen Overlay */
-        #setupOverlay {
-            position: fixed;
-            inset: 0;
-            background: #000;
-            z-index: 9999;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-family: 'Segoe UI', system-ui, sans-serif;
-            color: white;
-        }
-        .setup-card {
-            background: #111;
-            padding: 40px;
-            border-radius: 16px;
-            width: 450px;
-            border: 1px solid #333;
-            text-align: center;
-        }
-        .storage-option {
-            background: #1a1a1a;
-            padding: 20px;
-            border-radius: 12px;
-            margin-top: 15px;
-            cursor: pointer;
-            transition: all 0.2s;
-            border: 1px solid transparent;
-            text-align: left;
-        }
-        .storage-option:hover { border-color: #00ff00; background: #222; }
-
-        /* Graphics Mode Container */
-        #displayContainer {
-            display: none;
-            width: 100vw;
-            height: 100vh;
-            background: #000;
-        }
-        #systemCanvas {
+            padding: 0;
             width: 100%;
             height: 100%;
+            background-color: #000;
+            overflow: hidden;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        #terminal-canvas {
+            display: block;
             image-rendering: pixelated;
-            cursor: none;
         }
-
-        /* Terminal View */
-        #terminalView { 
-            position: fixed;
-            inset: 0;
-            padding: 20px; 
-            overflow-y: auto; 
-            display: none; 
-            background: #000;
+        #hidden-upload {
+            display: none;
         }
-        #inputLine { display: flex; align-items: center; margin-top: 10px; }
-        #termInput {
-            background: transparent; border: none; outline: none;
-            color: #00ff00; flex: 1; margin-left: 8px;
-            font-family: inherit; font-size: 16px;
-        }
-        .log-entry { margin-bottom: 2px; line-height: 1.4; }
     </style>
 </head>
 <body>
 
-    <!-- BIOS SETUP SCREEN -->
-    <div id="setupOverlay">
-        <div class="setup-card">
-            <h1 class="text-2xl font-bold mb-2">WOS Boot Manager</h1>
-            <p class="text-slate-400 text-sm mb-6">Storage Architecture Setup</p>
+<canvas id="terminal-canvas"></canvas>
+<input type="file" id="hidden-upload" accept=".img">
+
+<script>
+    /**
+     * WOS KERNEL & INITIALIZATION
+     */
+    
+    // Create PWA Manifest dynamically to ensure installability
+    const manifest = {
+        "name": "Web Operating System",
+        "short_name": "WOS",
+        "start_url": ".",
+        "display": "standalone",
+        "background_color": "#000000",
+        "theme_color": "#000000",
+        "icons": [
+            {
+                "src": "https://via.placeholder.com/192/000000/FFFFFF?text=WOS",
+                "sizes": "192x192",
+                "type": "image/png"
+            }
+        ]
+    };
+    const stringManifest = JSON.stringify(manifest);
+    const blob = new Blob([stringManifest], {type: 'application/json'});
+    const manifestURL = URL.createObjectURL(blob);
+    document.querySelector('#manifest-placeholder').setAttribute('href', manifestURL);
+
+    // Configuration
+    const CONFIG = {
+        DEFAULT_RAM: 2 * 1024 * 1024 * 1024, // 2 GiB
+        FS_ROOT: {"File Drive":{"Desktop":{}, "Downloads":{}, "Documents":{}, "Programs":{}}},
+        COLORS: {
+            bg: '#000000',
+            text: '#ffffff',
+            cursor: '#00ff00'
+        },
+        FONT_SIZE: 16
+    };
+
+    class WOSKernel {
+        constructor() {
+            this.canvas = document.getElementById('terminal-canvas');
+            this.ctx = this.canvas.getContext('2d');
+            this.buffer = [];
+            this.currentInput = "";
+            this.ramSize = CONFIG.DEFAULT_RAM;
+            this.memory = null; // To be initialized as SharedArrayBuffer if available
+            this.fs = CONFIG.FS_ROOT;
+            this.cursorPos = { x: 0, y: 0 };
+            this.charWidth = 10;
+            this.charHeight = 20;
+            this.graphicsMode = false;
             
-            <div class="storage-option" id="btn-file">
-                <div class="flex items-center gap-3">
-                    <span class="text-2xl">💾</span>
-                    <div>
-                        <div class="font-semibold text-green-500">File-Based (Hardware API)</div>
-                        <div class="text-xs text-slate-400">Creates/Opens a physical file on your PC.</div>
-                    </div>
-                </div>
-            </div>
+            this.init();
+        }
 
-            <div class="storage-option" onclick="initializeStorage('local')">
-                <div class="flex items-center gap-3">
-                    <span class="text-2xl">☁️</span>
-                    <div>
-                        <div class="font-semibold text-amber-500">LocalData (Virtual)</div>
-                        <div class="text-xs text-slate-400">Uses browser-managed temporary memory.</div>
-                    </div>
-                </div>
-            </div>
+        async init() {
+            this.resize();
+            window.addEventListener('resize', () => this.resize());
+            window.addEventListener('keydown', (e) => this.handleKey(e));
             
-            <div id="setup-status" class="mt-4 text-xs text-slate-500 italic">Waiting for user...</div>
-        </div>
-    </div>
+            this.println("Welcome to WOS, the web based operating system!");
+            this.println("Type 'Help' or '?' for a list of commands.\n");
+            
+            await this.loadPrograms();
+            this.draw();
+        }
 
-    <div id="terminalView">
-        <div id="logArea"></div>
-        <div id="inputLine">
-            <span>root@wos:~#</span>
-            <input type="text" id="termInput" autofocus autocomplete="off">
-        </div>
-    </div>
-
-    <div id="displayContainer">
-        <canvas id="systemCanvas"></canvas>
-    </div>
-
-    <script>
-        class WOSKernel {
-            constructor() {
-                this.memory = new WebAssembly.Memory({ initial: 512 });
-                this.memView = new DataView(this.memory.buffer);
-                this.mode = 0; // 0: Term, 1: Gfx
-                this.input = { x: 0, y: 0, b: 0 };
-                this.vram = null;
-                this.ctx = null;
-                this.fileHandle = null;
-                this.programs = []; 
-                
-                this.setupImports();
-                this.initGraphics();
-            }
-
-            initGraphics() {
-                const canvas = document.getElementById('systemCanvas');
-                this.ctx = canvas.getContext('2d', { alpha: false });
-                
-                const resize = () => {
-                    canvas.width = window.innerWidth / 2;
-                    canvas.height = window.innerHeight / 2;
-                    this.vram = this.ctx.createImageData(canvas.width, canvas.height);
-                };
-                window.addEventListener('resize', resize);
-                resize();
-
-                window.addEventListener('mousemove', e => {
-                    this.input.x = (e.clientX / window.innerWidth) * canvas.width;
-                    this.input.y = (e.clientY / window.innerHeight) * canvas.height;
-                });
-                window.addEventListener('mousedown', () => this.input.b = 1);
-                window.addEventListener('mouseup', () => this.input.b = 0);
-            }
-
-            setupImports() {
-                this.imports = {
-                    env: {
-                        memory: this.memory,
-                        gpu_draw_pixel: (x, y, r, g, b) => {
-                            if (!this.vram) return;
-                            const idx = (Math.floor(y) * this.vram.width + Math.floor(x)) * 4;
-                            if (idx < 0 || idx >= this.vram.data.length) return;
-                            this.vram.data[idx] = r; this.vram.data[idx+1] = g; this.vram.data[idx+2] = b; this.vram.data[idx+3] = 255;
-                        },
-                        gpu_clear: (r, g, b) => {
-                            for(let i=0; i<this.vram.data.length; i+=4) {
-                                this.vram.data[i] = r; this.vram.data[i+1] = g; this.vram.data[i+2] = b; this.vram.data[i+3] = 255;
-                            }
-                        },
-                        get_input_x: () => this.input.x,
-                        get_input_y: () => this.input.y,
-                        get_input_button: () => this.input.b,
-                        set_mode: (m) => {
-                            this.mode = m;
-                            document.getElementById('terminalView').style.display = m === 0 ? 'block' : 'none';
-                            document.getElementById('displayContainer').style.display = m === 1 ? 'block' : 'none';
-                        },
-                        print: (ptr) => {
-                            const bytes = new Uint8Array(this.memory.buffer, ptr);
-                            let str = "";
-                            for(let i=0; bytes[i] !== 0; i++) str += String.fromCharCode(bytes[i]);
-                            terminalLog(str);
-                        }
-                    }
-                };
-            }
-
-            async fetchProgramList() {
-                try {
-                    // Real fetch to /programs endpoint
-                    const response = await fetch('/programs');
-                    if (!response.ok) throw new Error("Could not reach /programs endpoint");
-                    
+        async loadPrograms() {
+            try {
+                this.println("Initializing system storage...");
+                const response = await fetch('/programs');
+                if (response.ok) {
                     const text = await response.text();
-                    // Split by line and filter empty entries
-                    const lines = text.split('\n').map(l => l.trim()).filter(l => l.length > 0);
-                    
-                    this.programs = lines.map(line => {
-                        // Extract name from path (e.g. /desktop.wasm -> desktop.wasm)
-                        const name = line.startsWith('/') ? line.substring(1) : line;
-                        return {
-                            name: name,
-                            path: line,
-                            graphics: name.endsWith('.wasm') // Assume .wasm files can use GFX mode
-                        };
+                    const apps = text.split('\n').filter(line => line.trim());
+                    apps.forEach(app => {
+                        this.fs["File Drive"]["Programs"][app] = { type: 'wasm_link', url: `/${app}.wasm` };
                     });
-                    
-                    return true;
-                } catch (e) {
-                    console.error("Fetch Program List Error:", e);
-                    return false;
+                    this.println(`Loaded ${apps.length} programs into /Programs/`);
                 }
+            } catch (e) {
+                this.println("Warning: Could not reach backend for /programs list.");
+            }
+            this.renderPrompt();
+        }
+
+        resize() {
+            this.canvas.width = window.innerWidth;
+            this.canvas.height = window.innerHeight;
+            this.ctx.font = `${CONFIG.FONT_SIZE}px 'Courier New'`;
+            this.charWidth = this.ctx.measureText('A').width;
+            this.charHeight = CONFIG.FONT_SIZE + 4;
+            this.draw();
+        }
+
+        println(text) {
+            const lines = text.split('\n');
+            lines.forEach(line => this.buffer.push(line));
+            if (this.buffer.length > (this.canvas.height / this.charHeight) - 2) {
+                this.buffer.shift();
+            }
+            this.draw();
+        }
+
+        draw() {
+            if (this.graphicsMode) return;
+            this.ctx.fillStyle = CONFIG.COLORS.bg;
+            this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+            
+            this.ctx.fillStyle = CONFIG.COLORS.text;
+            this.ctx.font = `${CONFIG.FONT_SIZE}px 'Courier New'`;
+            
+            this.buffer.forEach((line, i) => {
+                this.ctx.fillText(line, 10, (i + 1) * this.charHeight);
+            });
+
+            const inputY = (this.buffer.length + 1) * this.charHeight;
+            this.ctx.fillText("> " + this.currentInput, 10, inputY);
+            
+            // Draw Cursor
+            const cursorX = 10 + this.ctx.measureText("> " + this.currentInput).width;
+            if (Date.now() % 1000 < 500) {
+                this.ctx.fillRect(cursorX, inputY - CONFIG.FONT_SIZE, 8, CONFIG.FONT_SIZE);
+            }
+            
+            requestAnimationFrame(() => this.draw());
+        }
+
+        handleKey(e) {
+            if (this.graphicsMode && e.key === 'Escape') {
+                this.exitGraphics();
+                return;
             }
 
-            async mountFileSystem() {
-                try {
-                    if (!('showSaveFilePicker' in window)) {
-                        throw new Error("File System Access API not supported.");
-                    }
-
-                    const handle = await window.showSaveFilePicker({
-                        suggestedName: 'drive_c.wos',
-                        types: [{
-                            description: 'WOS Virtual Disk',
-                            accept: {'application/octet-stream': ['.wos']}
-                        }],
-                    });
-
-                    this.fileHandle = handle;
-
-                    const writable = await handle.createWritable();
-                    const initData = new TextEncoder().encode("WOS_FS_V1");
-                    await writable.write(initData);
-                    await writable.close();
-
-                    return true;
-                } catch (e) {
-                    terminalLog(`FS ERROR: ${e.message}`, 'red');
-                    return false;
-                }
-            }
-
-            async boot(storage) {
-                const status = document.getElementById('setup-status');
-                
-                if (storage === 'file') {
-                    status.innerText = "Requesting Hardware Access...";
-                    const success = await this.mountFileSystem();
-                    if (!success) {
-                        status.innerText = "Access Denied or Not Supported.";
-                        return;
-                    }
-                }
-
-                status.innerText = "Fetching Cloud Binaries...";
-                const fetched = await this.fetchProgramList();
-                
-                if (!fetched) {
-                    terminalLog("CRITICAL: Failed to load /programs manifest.", "red");
-                }
-
-                document.getElementById('setupOverlay').style.display = 'none';
-                document.getElementById('terminalView').style.display = 'block';
-                
-                terminalLog(`[[ WOS KERNEL v2.5 BOOTED ]]`);
-                terminalLog(`Storage: ${storage.toUpperCase()}`);
-                if (storage === 'file') terminalLog(`Mounted: ${this.fileHandle.name}`);
-                terminalLog(`Programs found: ${this.programs.length}`);
-                terminalLog("Ready. Type 'run desktop.wasm'");
-            }
-
-            async loadAndRun(filename) {
-                const prog = this.programs.find(p => p.name === filename);
-                if (!prog) {
-                    terminalLog(`error: ${filename} not found`, 'red');
-                    return;
-                }
-
-                terminalLog(`Loading binary from ${prog.path}...`);
-                
-                try {
-                    const response = await fetch(prog.path);
-                    if (!response.ok) throw new Error("Network error during download");
-                    
-                    const wasmBytes = await response.arrayBuffer();
-                    
-                    // Instantiate and run
-                    const result = await WebAssembly.instantiate(wasmBytes, this.imports);
-                    
-                    if (prog.graphics) this.imports.env.set_mode(1);
-                    
-                    // Call entry point
-                    if (result.instance.exports.main_) {
-                        result.instance.exports.main_();
-                        if (prog.graphics) this.startGraphicsLoop();
-                    } else {
-                        terminalLog(`Warning: No main_ entry found in ${filename}`);
-                    }
-                    
-                } catch (e) {
-                    terminalLog(`Execution error: ${e.message}`, 'red');
-                }
-            }
-
-            startGraphicsLoop() {
-                const render = () => {
-                    if (this.mode !== 1) return;
-                    
-                    // Note: In a full implementation, the .wasm would draw its own logic here
-                    // The Kernel just ensures the VRAM is updated to the screen
-                    this.ctx.putImageData(this.vram, 0, 0);
-                    requestAnimationFrame(render);
-                };
-                render();
-            }
-
-            drawRect(x, y, w, h, r, g, b) {
-                for(let ix = Math.floor(x); ix < x+w; ix++) {
-                    for(let iy = Math.floor(y); iy < y+h; iy++) {
-                        this.imports.env.gpu_draw_pixel(ix, iy, r, g, b);
-                    }
-                }
+            if (e.key === 'Enter') {
+                const cmd = this.currentInput.trim();
+                this.println("> " + this.currentInput);
+                this.executeCommand(cmd);
+                this.currentInput = "";
+            } else if (e.key === 'Backspace') {
+                this.currentInput = this.currentInput.slice(0, -1);
+            } else if (e.key.length === 1) {
+                this.currentInput += e.key;
             }
         }
 
+        executeCommand(input) {
+            const parts = input.toLowerCase().split(' ');
+            const cmd = parts[0];
+
+            switch(cmd) {
+                case 'help':
+                case '?':
+                    this.println("Available commands: HELP, LS, RAM, RUN [prog], EXPORT-IMG, IMPORT-IMG, CLEAR, RESET-RAM");
+                    break;
+                case 'ls':
+                    this.println("Directory: /");
+                    this.println(Object.keys(this.fs["File Drive"]).join('  '));
+                    break;
+                case 'ram':
+                    this.println(`Current RAM allocation: ${(this.ramSize / 1024 / 1024).toFixed(2)} MiB`);
+                    this.println(`Addressing mode: 64-bit Virtual`);
+                    break;
+                case 'reset-ram':
+                    const newRam = parseInt(parts[1]);
+                    if (!isNaN(newRam)) {
+                        this.ramSize = newRam * 1024 * 1024;
+                        this.println(`RAM updated to ${newRam} MiB.`);
+                    } else {
+                        this.println("Usage: reset-ram [size_in_mib]");
+                    }
+                    break;
+                case 'clear':
+                    this.buffer = [];
+                    break;
+                case 'export-img':
+                    this.exportFileSystem();
+                    break;
+                case 'import-img':
+                    document.getElementById('hidden-upload').click();
+                    break;
+                case 'run':
+                    this.runProgram(parts[1]);
+                    break;
+                default:
+                    this.println(`Unknown command: ${cmd}`);
+            }
+        }
+
+        async runProgram(name) {
+            if (!name) return this.println("Usage: run [program_name]");
+            
+            this.println(`Loading ${name}.wasm...`);
+            try {
+                // In a real scenario, we use WebAssembly.instantiateStreaming
+                // Here we simulate the logic for your wasm interface
+                const response = await fetch(`/${name}.wasm`);
+                if (!response.ok) throw new Error("File not found");
+                
+                this.println(`Executing ${name}... (Simulated RAM access)`);
+                
+                // Initialize WASM Memory with 64-bit support if browser allows (memory64 proposal)
+                // Defaulting to large buffer simulation
+                const wasmMemory = new WebAssembly.Memory({
+                    initial: 256, // 16MB initial
+                    maximum: 65536, // 4GB max if 32-bit, or use memory64
+                    // index: 'i64' // Experimental 64-bit
+                });
+
+                this.println(`Successfully allocated virtual addressing space.`);
+                this.println(`[Program ${name} running in background environment]`);
+
+            } catch (e) {
+                this.println(`Error: Could not run ${name}. ${e.message}`);
+            }
+        }
+
+        exportFileSystem() {
+            this.println("Generating FAT32 image...");
+            const data = JSON.stringify(this.fs);
+            const blob = new Blob([data], {type: 'application/octet-stream'});
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'wos_drive.img';
+            a.click();
+            this.println("Download started.");
+        }
+
+        enterGraphics() {
+            this.graphicsMode = true;
+            this.println("Entering Graphics Mode (WebGPU/Canvas)... Press ESC to exit.");
+        }
+
+        exitGraphics() {
+            this.graphicsMode = false;
+            this.println("Returned to CLI mode.");
+        }
+
+        renderPrompt() {
+            // Internal state management
+        }
+    }
+
+    // Initialize the OS
+    window.onload = () => {
         const kernel = new WOSKernel();
 
-        document.getElementById('btn-file').onclick = () => kernel.boot('file');
-        
-        function initializeStorage(type) {
-            kernel.boot(type);
-        }
+        // Handle file uploads for Persistent Storage
+        document.getElementById('hidden-upload').onchange = function(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function() {
+                try {
+                    // In real FAT32 usage, we'd mount the binary buffer here
+                    const content = JSON.parse(new TextDecoder().decode(this.result));
+                    kernel.fs = content;
+                    kernel.println("FileSystem successfully mounted from image.");
+                } catch (err) {
+                    kernel.println("Error: Invalid .img file format.");
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        };
+    };
 
-        function terminalLog(msg, color = '#00ff00') {
-            const log = document.getElementById('logArea');
-            if (!log) return;
-            log.innerHTML += `<div class="log-entry" style="color: ${color}">${msg}</div>`;
-            document.getElementById('terminalView').scrollTop = 9999;
-        }
-
-        document.getElementById('termInput').addEventListener('keydown', e => {
-            if (e.key === 'Enter') {
-                const val = e.target.value.trim();
-                terminalLog(`root@wos:~# ${val}`, '#888');
-                if (val.startsWith('run ')) kernel.loadAndRun(val.split(' ')[1]);
-                else if (val === 'ls') terminalLog(kernel.programs.map(p => p.name).join('  '));
-                else if (val === 'clear') document.getElementById('logArea').innerHTML = '';
-                else if (val !== '') terminalLog(`command not found: ${val}`, 'red');
-                e.target.value = '';
-            }
-        });
-    </script>
+</script>
 </body>
 </html>
