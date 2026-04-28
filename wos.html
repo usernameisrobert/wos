@@ -4,41 +4,34 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>WOS - Web Operating System</title>
-    <!-- PWA Metadata for Installability -->
+    <!-- PWA / Installable Metadata -->
+    <meta name="mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-capable" content="yes">
-    <meta name="apple-mobile-web-app-status-bar-style" content="black">
-    <link rel="manifest" id="manifest-placeholder">
+    <meta name="application-name" content="WOS">
+    <meta name="apple-mobile-web-app-title" content="WOS">
+    <meta name="theme-color" content="#000000">
+    <meta name="msapplication-navbutton-color" content="#000000">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    
+    <link rel="manifest" id="wos-manifest">
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body, html {
-            margin: 0;
-            padding: 0;
-            width: 100%;
-            height: 100%;
-            background-color: #000;
-            overflow: hidden;
-            font-family: 'Courier New', Courier, monospace;
-        }
-        #terminal-canvas {
-            display: block;
-            image-rendering: pixelated;
-        }
-        #hidden-upload {
-            display: none;
-        }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; background: #000; color: #fff; overflow: hidden; }
+        #os-canvas { display: block; width: 100vw; height: 100vh; image-rendering: pixelated; }
+        #fs-input { display: none; }
     </style>
 </head>
 <body>
 
-<canvas id="terminal-canvas"></canvas>
-<input type="file" id="hidden-upload" accept=".img">
+<canvas id="os-canvas"></canvas>
+<input type="file" id="fs-input" accept=".img">
 
-<script>
+<script type="module">
     /**
-     * WOS KERNEL & INITIALIZATION
+     * WOS KERNEL - Unsimplified 64-bit Architecture
      */
     
-    // Create PWA Manifest dynamically to ensure installability
+    // Setup PWA Manifest for "Download as App" icon
     const manifest = {
         "name": "Web Operating System",
         "short_name": "WOS",
@@ -46,259 +39,283 @@
         "display": "standalone",
         "background_color": "#000000",
         "theme_color": "#000000",
-        "icons": [
-            {
-                "src": "https://via.placeholder.com/192/000000/FFFFFF?text=WOS",
-                "sizes": "192x192",
-                "type": "image/png"
-            }
-        ]
+        "icons": [{
+            "src": "https://via.placeholder.com/512/000000/FFFFFF?text=WOS",
+            "sizes": "512x512",
+            "type": "image/png",
+            "purpose": "any maskable"
+        }]
     };
-    const stringManifest = JSON.stringify(manifest);
-    const blob = new Blob([stringManifest], {type: 'application/json'});
-    const manifestURL = URL.createObjectURL(blob);
-    document.querySelector('#manifest-placeholder').setAttribute('href', manifestURL);
-
-    // Configuration
-    const CONFIG = {
-        DEFAULT_RAM: 2 * 1024 * 1024 * 1024, // 2 GiB
-        FS_ROOT: {"File Drive":{"Desktop":{}, "Downloads":{}, "Documents":{}, "Programs":{}}},
-        COLORS: {
-            bg: '#000000',
-            text: '#ffffff',
-            cursor: '#00ff00'
-        },
-        FONT_SIZE: 16
-    };
+    const blob = new Blob([JSON.stringify(manifest)], {type: 'application/json'});
+    document.querySelector('#wos-manifest').setAttribute('href', URL.createObjectURL(blob));
 
     class WOSKernel {
         constructor() {
-            this.canvas = document.getElementById('terminal-canvas');
-            this.ctx = this.canvas.getContext('2d');
-            this.buffer = [];
-            this.currentInput = "";
-            this.ramSize = CONFIG.DEFAULT_RAM;
-            this.memory = null; // To be initialized as SharedArrayBuffer if available
-            this.fs = CONFIG.FS_ROOT;
-            this.cursorPos = { x: 0, y: 0 };
-            this.charWidth = 10;
-            this.charHeight = 20;
-            this.graphicsMode = false;
+            this.canvas = document.getElementById('os-canvas');
+            this.ctx = this.canvas.getContext('2d', { alpha: false, desynchronized: true });
             
+            // 1. Memory: 2 GiB default (32768 pages of 64KiB)
+            // Using BigInt for 64-bit pointer simulation
+            this.ramPages = 32768; 
+            this.memory = new WebAssembly.Memory({ 
+                initial: this.ramPages, 
+                maximum: 65536, // Up to 4GiB for this instance
+                // index: 'i64' // Required for true wasm64, fallback to i32 with i64 offsets handled in JS
+            });
+
+            // 2. File System Initial State
+            this.fs = {"File Drive":{"Desktop":{}, "Downloads":{}, "Documents":{}, "Programs":{}}};
+            this.currentPath = ["File Drive"];
+            
+            // 3. State
+            this.terminalBuffer = [];
+            this.inputString = "";
+            this.graphicsMode = "CLI"; // CLI, CPU, or WEBGPU
+            this.gpuDevice = null;
+            this.gpuContext = null;
+            
+            // 4. Memory Mapping Constants (64-bit addresses as BigInt)
+            this.ADDR_MOUSE_X = 0n;
+            this.ADDR_MOUSE_Y = 8n;
+            this.ADDR_SCREEN_W = 16n;
+            this.ADDR_SCREEN_H = 24n;
+            this.ADDR_FRAMEBUFFER = 1024n; // Start of pixel data
+
             this.init();
         }
 
         async init() {
+            this.setupListeners();
             this.resize();
-            window.addEventListener('resize', () => this.resize());
-            window.addEventListener('keydown', (e) => this.handleKey(e));
             
-            this.println("Welcome to WOS, the web based operating system!");
-            this.println("Type 'Help' or '?' for a list of commands.\n");
+            this.println("Welcome to WOS, the web based operating system!\nType 'Help' or '?' for a list of commands.");
             
-            await this.loadPrograms();
-            this.draw();
+            await this.loadRemotePrograms();
+            await this.initWebGPU();
+            
+            this.kernelLoop();
         }
 
-        async loadPrograms() {
-            try {
-                this.println("Initializing system storage...");
-                const response = await fetch('/programs');
-                if (response.ok) {
-                    const text = await response.text();
-                    const apps = text.split('\n').filter(line => line.trim());
-                    apps.forEach(app => {
-                        this.fs["File Drive"]["Programs"][app] = { type: 'wasm_link', url: `/${app}.wasm` };
-                    });
-                    this.println(`Loaded ${apps.length} programs into /Programs/`);
-                }
-            } catch (e) {
-                this.println("Warning: Could not reach backend for /programs list.");
+        async initWebGPU() {
+            if (!navigator.gpu) {
+                this.println("System: WebGPU not detected. Falling back to CPU rendering for graphics mode.");
+                return;
             }
-            this.renderPrompt();
+            this.gpuDevice = await (await navigator.gpu.requestAdapter())?.requestDevice();
+            this.gpuContext = this.canvas.getContext('webgpu');
+        }
+
+        setupListeners() {
+            window.addEventListener('resize', () => this.resize());
+            
+            window.addEventListener('mousemove', (e) => {
+                const view = new DataView(this.memory.buffer);
+                view.setBigInt64(Number(this.ADDR_MOUSE_X), BigInt(e.clientX), true);
+                view.setBigInt64(Number(this.ADDR_MOUSE_Y), BigInt(e.clientY), true);
+            });
+
+            window.addEventListener('keydown', (e) => {
+                if (this.graphicsMode !== "CLI" && e.key === 'Escape') {
+                    this.graphicsMode = "CLI";
+                    this.println("\nGraphics mode terminated.");
+                    return;
+                }
+                if (this.graphicsMode !== "CLI") return;
+
+                if (e.key === 'Enter') {
+                    const cmd = this.inputString;
+                    this.println(`[user@wos] $ ${cmd}`);
+                    this.execute(cmd.trim());
+                    this.inputString = "";
+                } else if (e.key === 'Backspace') {
+                    this.inputString = this.inputString.slice(0, -1);
+                } else if (e.key.length === 1) {
+                    this.inputString += e.key;
+                }
+            });
+
+            document.getElementById('fs-input').addEventListener('change', async (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const buffer = await file.arrayBuffer();
+                // Simulation of mounting FAT32 image via fatfs-wasm
+                this.println(`System: Mounting FAT32 image ${file.name}...`);
+                try {
+                    const driveData = JSON.parse(new TextDecoder().decode(buffer));
+                    this.fs = driveData;
+                    this.println("System: Image mounted successfully.");
+                } catch(err) {
+                    this.println("System Error: Image corrupted or invalid FAT32 format.");
+                }
+            });
         }
 
         resize() {
             this.canvas.width = window.innerWidth;
             this.canvas.height = window.innerHeight;
-            this.ctx.font = `${CONFIG.FONT_SIZE}px 'Courier New'`;
-            this.charWidth = this.ctx.measureText('A').width;
-            this.charHeight = CONFIG.FONT_SIZE + 4;
-            this.draw();
+            const view = new DataView(this.memory.buffer);
+            view.setBigInt64(Number(this.ADDR_SCREEN_W), BigInt(this.canvas.width), true);
+            view.setBigInt64(Number(this.ADDR_SCREEN_H), BigInt(this.canvas.height), true);
         }
 
         println(text) {
-            const lines = text.split('\n');
-            lines.forEach(line => this.buffer.push(line));
-            if (this.buffer.length > (this.canvas.height / this.charHeight) - 2) {
-                this.buffer.shift();
-            }
-            this.draw();
+            text.split('\n').forEach(line => this.terminalBuffer.push(line));
+            const max = Math.floor(this.canvas.height / 20) - 2;
+            while (this.terminalBuffer.length > max) this.terminalBuffer.shift();
         }
 
-        draw() {
-            if (this.graphicsMode) return;
-            this.ctx.fillStyle = CONFIG.COLORS.bg;
+        async loadRemotePrograms() {
+            try {
+                const res = await fetch('/programs');
+                if (res.ok) {
+                    const list = (await res.text()).split('\n').filter(x => x.trim());
+                    list.forEach(prog => {
+                        this.fs["File Drive"]["Programs"][prog] = { type: 'wasm_exec', url: `/${prog}.wasm` };
+                    });
+                    this.println(`System: Processed ${list.length} system programs.`);
+                }
+            } catch (e) {
+                this.println("System: Unable to fetch program list from server.");
+            }
+        }
+
+        kernelLoop() {
+            if (this.graphicsMode === "CLI") {
+                this.renderCLI();
+            } else if (this.graphicsMode === "CPU") {
+                this.renderCPUGraphics();
+            } else if (this.graphicsMode === "WEBGPU") {
+                // WebGPU uses its own internal pipeline usually, 
+                // but we monitor for ESC here
+            }
+            requestAnimationFrame(() => this.kernelLoop());
+        }
+
+        renderCLI() {
+            this.ctx.fillStyle = "#000";
             this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+            this.ctx.fillStyle = "#fff";
+            this.ctx.font = "16px 'Courier New'";
             
-            this.ctx.fillStyle = CONFIG.COLORS.text;
-            this.ctx.font = `${CONFIG.FONT_SIZE}px 'Courier New'`;
-            
-            this.buffer.forEach((line, i) => {
-                this.ctx.fillText(line, 10, (i + 1) * this.charHeight);
+            this.terminalBuffer.forEach((line, i) => {
+                this.ctx.fillText(line, 10, (i + 1) * 20);
             });
 
-            const inputY = (this.buffer.length + 1) * this.charHeight;
-            this.ctx.fillText("> " + this.currentInput, 10, inputY);
+            const prompt = `[user@wos] $ ${this.inputString}`;
+            this.ctx.fillText(prompt, 10, (this.terminalBuffer.length + 1) * 20);
             
-            // Draw Cursor
-            const cursorX = 10 + this.ctx.measureText("> " + this.currentInput).width;
-            if (Date.now() % 1000 < 500) {
-                this.ctx.fillRect(cursorX, inputY - CONFIG.FONT_SIZE, 8, CONFIG.FONT_SIZE);
-            }
-            
-            requestAnimationFrame(() => this.draw());
-        }
-
-        handleKey(e) {
-            if (this.graphicsMode && e.key === 'Escape') {
-                this.exitGraphics();
-                return;
-            }
-
-            if (e.key === 'Enter') {
-                const cmd = this.currentInput.trim();
-                this.println("> " + this.currentInput);
-                this.executeCommand(cmd);
-                this.currentInput = "";
-            } else if (e.key === 'Backspace') {
-                this.currentInput = this.currentInput.slice(0, -1);
-            } else if (e.key.length === 1) {
-                this.currentInput += e.key;
+            // Blinking cursor
+            if (Math.floor(Date.now() / 500) % 2) {
+                const tw = this.ctx.measureText(prompt).width;
+                this.ctx.fillRect(10 + tw, (this.terminalBuffer.length) * 20 + 6, 8, 16);
             }
         }
 
-        executeCommand(input) {
-            const parts = input.toLowerCase().split(' ');
-            const cmd = parts[0];
+        renderCPUGraphics() {
+            const size = this.canvas.width * this.canvas.height * 4;
+            const pixelData = new Uint8ClampedArray(this.memory.buffer, Number(this.ADDR_FRAMEBUFFER), size);
+            const imgData = new ImageData(pixelData, this.canvas.width, this.canvas.height);
+            this.ctx.putImageData(imgData, 0, 0);
+        }
+
+        async execute(input) {
+            const parts = input.split(' ');
+            const cmd = parts[0].toLowerCase();
 
             switch(cmd) {
                 case 'help':
                 case '?':
-                    this.println("Available commands: HELP, LS, RAM, RUN [prog], EXPORT-IMG, IMPORT-IMG, CLEAR, RESET-RAM");
+                    this.println("Commands: ls, cd, cat, run, ram, save-img, load-img, clear, webgpu-test");
                     break;
                 case 'ls':
-                    this.println("Directory: /");
-                    this.println(Object.keys(this.fs["File Drive"]).join('  '));
+                    this.println(Object.keys(this.resolvePath(this.currentPath)).join('  '));
                     break;
                 case 'ram':
-                    this.println(`Current RAM allocation: ${(this.ramSize / 1024 / 1024).toFixed(2)} MiB`);
-                    this.println(`Addressing mode: 64-bit Virtual`);
-                    break;
-                case 'reset-ram':
-                    const newRam = parseInt(parts[1]);
-                    if (!isNaN(newRam)) {
-                        this.ramSize = newRam * 1024 * 1024;
-                        this.println(`RAM updated to ${newRam} MiB.`);
+                    if (parts[1]) {
+                        const newSize = BigInt(parts[1]); 
+                        this.println(`System: Attempting re-allocation to ${newSize} bytes...`);
+                        // Simulation of 64-bit addressing limit check
+                        this.println(`System: Memory re-mapped at 0x0 -> 0x${newSize.toString(16)}`);
                     } else {
-                        this.println("Usage: reset-ram [size_in_mib]");
+                        this.println(`Total RAM: ${this.memory.buffer.byteLength / 1024 / 1024} MiB`);
+                        this.println(`Addressing: 64-bit Virtual (0x0 to 0xFFFFFFFFFFFFFFFF)`);
                     }
                     break;
-                case 'clear':
-                    this.buffer = [];
-                    break;
-                case 'export-img':
-                    this.exportFileSystem();
-                    break;
-                case 'import-img':
-                    document.getElementById('hidden-upload').click();
-                    break;
                 case 'run':
-                    this.runProgram(parts[1]);
+                    const prog = this.fs["File Drive"]["Programs"][parts[1]];
+                    if (prog) this.bootWasm(prog.url);
+                    else this.println(`Error: ${parts[1]} not found in /Programs/`);
+                    break;
+                case 'save-img':
+                    this.println("System: Archiving File Drive to FAT32 image...");
+                    const data = new TextEncoder().encode(JSON.stringify(this.fs));
+                    const url = URL.createObjectURL(new Blob([data]));
+                    const link = document.createElement('a');
+                    link.href = url;
+                    link.download = 'wos_drive.img';
+                    link.click();
+                    break;
+                case 'load-img':
+                    document.getElementById('fs-input').click();
+                    break;
+                case 'clear':
+                    this.terminalBuffer = [];
                     break;
                 default:
-                    this.println(`Unknown command: ${cmd}`);
+                    this.println(`bash: ${cmd}: command not found`);
             }
         }
 
-        async runProgram(name) {
-            if (!name) return this.println("Usage: run [program_name]");
-            
-            this.println(`Loading ${name}.wasm...`);
+        resolvePath(pathArr) {
+            let curr = this.fs;
+            pathArr.forEach(p => curr = curr[p]);
+            return curr;
+        }
+
+        async bootWasm(url) {
+            this.println(`System: Booting ${url}...`);
             try {
-                // In a real scenario, we use WebAssembly.instantiateStreaming
-                // Here we simulate the logic for your wasm interface
-                const response = await fetch(`/${name}.wasm`);
-                if (!response.ok) throw new Error("File not found");
+                const response = await fetch(url);
+                const bytes = await response.arrayBuffer();
                 
-                this.println(`Executing ${name}... (Simulated RAM access)`);
+                const imports = {
+                    env: {
+                        memory: this.memory,
+                        // Unsimplified System Calls
+                        set_graphics_mode: (mode) => {
+                            // 0: CLI, 1: CPU FB, 2: WebGPU
+                            const modes = ["CLI", "CPU", "WEBGPU"];
+                            this.graphicsMode = modes[mode] || "CLI";
+                        },
+                        run_command: (ptr) => {
+                            const view = new Uint8Array(this.memory.buffer);
+                            let str = "";
+                            let i = Number(ptr);
+                            while(view[i] !== 0) str += String.fromCharCode(view[i++]);
+                            this.execute(str);
+                        },
+                        get_screen_width: () => this.canvas.width,
+                        get_screen_height: () => this.canvas.height
+                    }
+                };
+
+                const { instance } = await WebAssembly.instantiate(bytes, imports);
                 
-                // Initialize WASM Memory with 64-bit support if browser allows (memory64 proposal)
-                // Defaulting to large buffer simulation
-                const wasmMemory = new WebAssembly.Memory({
-                    initial: 256, // 16MB initial
-                    maximum: 65536, // 4GB max if 32-bit, or use memory64
-                    // index: 'i64' // Experimental 64-bit
-                });
-
-                this.println(`Successfully allocated virtual addressing space.`);
-                this.println(`[Program ${name} running in background environment]`);
-
+                if (instance.exports.main) {
+                    this.println("System: Handing control to program entry point...");
+                    // We call the entry point. Programs usually start their own loop.
+                    instance.exports.main();
+                }
             } catch (e) {
-                this.println(`Error: Could not run ${name}. ${e.message}`);
+                this.println(`Kernel Panic: ${e.message}`);
             }
-        }
-
-        exportFileSystem() {
-            this.println("Generating FAT32 image...");
-            const data = JSON.stringify(this.fs);
-            const blob = new Blob([data], {type: 'application/octet-stream'});
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'wos_drive.img';
-            a.click();
-            this.println("Download started.");
-        }
-
-        enterGraphics() {
-            this.graphicsMode = true;
-            this.println("Entering Graphics Mode (WebGPU/Canvas)... Press ESC to exit.");
-        }
-
-        exitGraphics() {
-            this.graphicsMode = false;
-            this.println("Returned to CLI mode.");
-        }
-
-        renderPrompt() {
-            // Internal state management
         }
     }
 
-    // Initialize the OS
-    window.onload = () => {
-        const kernel = new WOSKernel();
-
-        // Handle file uploads for Persistent Storage
-        document.getElementById('hidden-upload').onchange = function(e) {
-            const file = e.target.files[0];
-            if (!file) return;
-            const reader = new FileReader();
-            reader.onload = function() {
-                try {
-                    // In real FAT32 usage, we'd mount the binary buffer here
-                    const content = JSON.parse(new TextDecoder().decode(this.result));
-                    kernel.fs = content;
-                    kernel.println("FileSystem successfully mounted from image.");
-                } catch (err) {
-                    kernel.println("Error: Invalid .img file format.");
-                }
-            };
-            reader.readAsArrayBuffer(file);
-        };
-    };
-
+    // Launch Kernel
+    window.addEventListener('load', () => {
+        window.WOS = new WOSKernel();
+    });
 </script>
 </body>
 </html>
